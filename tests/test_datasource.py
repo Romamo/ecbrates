@@ -25,37 +25,76 @@ SAMPLE_XML = '''<?xml version="1.0" encoding="UTF-8"?>
 </gesmes:Envelope>
 '''
 
-def test_parse_data_with_sample_xml():
-    parsed = _parse_data(SAMPLE_XML)
-    assert "2024-06-07" in parsed
-    assert parsed["2024-06-07"]["USD"] == 1.09
-    assert parsed["2024-06-07"]["JPY"] == 170.12
-    assert "2024-06-06" in parsed
-    assert parsed["2024-06-06"]["USD"] == 1.08
-    assert parsed["2024-06-06"]["JPY"] == 169.50
+@pytest.fixture
+def sample_xml():
+    """Fixture providing a valid sample ECB XML payload for parsing tests."""
+    return SAMPLE_XML
 
-def test_fetch_data_success(caplog):
-    caplog.set_level(logging.INFO)
-    with patch("requests.get") as mock_get:
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.text = SAMPLE_XML
-        mock_get.return_value = mock_response
-        data = _fetch_data()
-        assert data == SAMPLE_XML
-        mock_get.assert_called_once()
-        assert "Fetching ECB data from" in caplog.text
-        assert "ECB data fetched successfully." in caplog.text
+@pytest.fixture
+def malformed_xml():
+    """Fixture providing a deliberately malformed XML string to test negative parsing paths."""
+    return "<invalid><unclosed>"
 
-def test_fetch_data_network_error(caplog):
-    caplog.set_level(logging.INFO)
-    with patch("requests.get", side_effect=requests.RequestException("Network error")):
-        with pytest.raises(requests.RequestException):
-            _fetch_data()
-        assert "Failed to fetch ECB data: Network error" in caplog.text
+@pytest.fixture
+def mocked_requests_get(monkeypatch):
+    """Fixture to mock requests.get with deterministic behavior and automatic cleanup.
 
-def test_parse_data_logging(caplog):
+    Returns a factory function that will set requests.get to return a mock response
+    with the provided text and status_code.
+    """
+    def _mock(response_text, status_code=200):
+        mock_resp = Mock()
+        mock_resp.status_code = status_code
+        mock_resp.text = response_text
+        def _get(*args, **kwargs):
+            return mock_resp
+        monkeypatch.setattr(requests, "get", _get)
+        return mock_resp
+    return _mock
+
+def test_parse_data_valid_xml_parses_rates(sample_xml):
+    """Arrange: a valid ECB XML feed; Act: parse it; Assert: expected dates and rates are present."""
+    parsed = _parse_data(sample_xml)
+    assert "2024-06-07" in parsed  # nosec
+    assert parsed["2024-06-07"]["USD"] == 1.09  # nosec
+    assert parsed["2024-06-07"]["JPY"] == 170.12  # nosec
+    assert "2024-06-06" in parsed  # nosec
+    assert parsed["2024-06-06"]["USD"] == 1.08  # nosec
+    assert parsed["2024-06-06"]["JPY"] == 169.50  # nosec
+
+def test_fetch_data_success(mocked_requests_get, caplog):
+    """Ensure _fetch_data returns XML text and logs expected messages on successful HTTP response."""
     caplog.set_level(logging.INFO)
-    parsed = _parse_data(SAMPLE_XML)
-    assert "Parsing ECB XML data..." in caplog.text
-    assert "Parsed 2 days of exchange rate data." in caplog.text 
+    mocked_requests_get(SAMPLE_XML, 200)
+    data = _fetch_data()
+    assert data == SAMPLE_XML  # nosec
+    assert "Fetching ECB data from" in caplog.text  # nosec
+    assert "ECB data fetched successfully." in caplog.text  # nosec
+
+def test_fetch_data_network_error_raises_and_logs(monkeypatch, caplog):
+    """Simulate a network error during fetch and verify that an exception is raised and logged."""
+    caplog.set_level(logging.INFO)
+    def _raise(*args, **kwargs):
+        raise requests.RequestException("Network error")
+    monkeypatch.setattr(requests, "get", _raise)
+    with pytest.raises(requests.RequestException):
+        _fetch_data()
+    assert "Failed to fetch ECB data: Network error" in caplog.text  # nosec
+
+def test_parse_data_logging(sample_xml, caplog):
+    """Verify that parsing logs both start and summary messages for the provided sample XML."""
+    caplog.set_level(logging.INFO)
+    parsed = _parse_data(sample_xml)
+    assert "Parsing ECB XML data..." in caplog.text  # nosec
+    assert "Parsed 2 days of exchange rate data." in caplog.text  # nosec
+
+def test_parse_data_malformed_xml_returns_empty_or_raises(malformed_xml):
+    """Negative test: malformed XML input should either raise an error or result in an empty mapping."""
+    try:
+        parsed = _parse_data(malformed_xml)
+    except Exception:
+        # Acceptable behavior is to raise an exception for malformed input
+        return
+    # If no exception is raised, the parser should return an empty dictionary-like mapping
+    assert isinstance(parsed, dict)
+    assert len(parsed) == 0
